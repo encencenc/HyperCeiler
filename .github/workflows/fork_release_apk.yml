@@ -1,4 +1,4 @@
-name: Fork Debug APK
+name: Fork Release APK
 
 on:
   push:
@@ -26,14 +26,21 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v6
 
-      - name: Assemble debug APK
+      - name: Assemble release APK
         env:
           GIT_ACTOR: ${{ github.actor }}
           GIT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./gradlew :app:assembleDebug
+        run: ./gradlew :app:assembleRelease
+
+      - name: Verify APK signature
+        run: |
+          signer=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -n 1)
+          for apk in app/build/outputs/apk/release/*.apk; do
+            "$signer" verify --print-certs "$apk"
+          done
 
       - uses: actions/upload-artifact@v7
         with:
-          name: HyperCeiler-debug
-          path: app/build/outputs/apk/debug/*.apk
+          name: HyperCeiler-release
+          path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
