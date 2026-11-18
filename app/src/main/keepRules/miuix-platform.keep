@@ -1,0 +1,6 @@
+# Miuix AutoDensity references framework classes that are absent from the public SDK stubs.
+-dontwarn android.app.ResourcesManager
+-dontwarn android.content.res.CompatibilityInfo
+-dontwarn android.content.res.ResourcesImpl
+-dontwarn android.content.res.ResourcesKey
+-dontwarn android.view.ViewRootImpl$ActivityConfigCallback
