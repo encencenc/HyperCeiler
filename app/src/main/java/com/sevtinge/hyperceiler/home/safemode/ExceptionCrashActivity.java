@@ -143,7 +143,7 @@ public class ExceptionCrashActivity extends AppCompatActivity implements View.On
     }
 
     @Override
-    protected void onDestroy() {
+    public void onDestroy() {
         super.onDestroy();
         AppCrashStore.setShowingReport(false);
     }
