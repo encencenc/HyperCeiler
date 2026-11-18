@@ -4,3 +4,8 @@
 -dontwarn android.content.res.ResourcesImpl
 -dontwarn android.content.res.ResourcesKey
 -dontwarn android.view.ViewRootImpl$ActivityConfigCallback
+
+# Miuix 4.0.0.28 layouts still inflate the compatibility views by their old names.
+-keep,allowoptimization public class fan.androidbase.widget.* extends android.view.View {
+    public <init>(android.content.Context, android.util.AttributeSet);
+}
