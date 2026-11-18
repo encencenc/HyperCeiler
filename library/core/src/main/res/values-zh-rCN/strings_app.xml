@@ -1119,6 +1119,7 @@
     <!--MIUI 安全组件-->
     <string name="guard_provider_hyperos">系统安全组件</string>
     <string name="guard_provider_disable_upload_applist">阻止自动上传已安装应用列表</string>
+    <string name="guard_provider_disable_upload_applist_desc">启用后，全量应用云查将无法返回云端结果。</string>
     <string name="guard_provider_disable_root_check">禁用环境检查</string>
     <!--系统桌面-->
     <string name="home_gesture">手势与导航</string>

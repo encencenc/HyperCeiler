@@ -18,18 +18,23 @@
 */
 package com.sevtinge.hyperceiler.libhook.rules.guardprovider;
 
+import com.sevtinge.hyperceiler.common.log.XposedLog;
 import com.sevtinge.hyperceiler.libhook.base.BaseHook;
-import io.github.lingqiqi5211.ezhooktool.xposed.java.IReplaceHook;
 
 import org.luckypray.dexkit.query.FindMethod;
+import org.luckypray.dexkit.query.enums.StringMatchType;
 import org.luckypray.dexkit.query.matchers.MethodMatcher;
 
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.List;
 
 import io.github.lingqiqi5211.ezhooktool.xposed.common.HookParam;
+import io.github.lingqiqi5211.ezhooktool.xposed.java.IReplaceHook;
 
 public class DisableUploadAppListNew extends BaseHook {
-    private Method mAntiDefraudAppManagerMethod;
+    private static final String APP_LIST_UPLOAD_URL = "https://flash.sec.miui.com/detect/app";
+    private Method mUploadMethod;
 
     @Override
     protected boolean useDexKit() {
@@ -38,16 +43,38 @@ public class DisableUploadAppListNew extends BaseHook {
 
     @Override
     protected boolean initDexKit() {
-        mAntiDefraudAppManagerMethod = requiredMember("AntiDefraudAppManager", bridge -> bridge.findMethod(FindMethod.create()
+        List<Method> uploadMethods = optionalMemberList("AppListUploadRequest", bridge -> bridge.findMethod(FindMethod.create()
             .matcher(MethodMatcher.create()
-                .usingStrings("AntiDefraudAppManager", "https://flash.sec.miui.com/detect/app")
+                .addUsingString(APP_LIST_UPLOAD_URL, StringMatchType.Equals)
+                .addUsingString("POST", StringMatchType.Equals)
+                .modifiers(Modifier.STATIC)
+                .paramTypes("com.miui.guardprovider.GuardApplication", "org.json.JSONObject")
+                .returnType(String.class)
+            )));
+        if (uploadMethods.size() == 1) {
+            mUploadMethod = uploadMethods.getFirst();
+            return true;
+        }
+        if (!uploadMethods.isEmpty()) {
+            XposedLog.w(TAG, getPackageName(), "Multiple app list upload requests found: " + uploadMethods.size());
+            return false;
+        }
+
+        mUploadMethod = optionalMember("AntiDefraudAppManager", bridge -> bridge.findMethod(FindMethod.create()
+            .matcher(MethodMatcher.create()
+                .usingStrings("AntiDefraudAppManager", APP_LIST_UPLOAD_URL)
             )).singleOrNull());
+        if (mUploadMethod == null) {
+            XposedLog.w(TAG, getPackageName(), "No unique app list upload method found");
+            return false;
+        }
         return true;
     }
 
     @Override
     public void init() {
-        com.sevtinge.hyperceiler.libhook.base.BaseHook.hookMethod(mAntiDefraudAppManagerMethod, new IReplaceHook() {
+        XposedLog.d(TAG, getPackageName(), "Hooking app list upload: " + mUploadMethod);
+        hookMethod(mUploadMethod, new IReplaceHook() {
             @Override
             public Object replace(HookParam param) {
                 return null;

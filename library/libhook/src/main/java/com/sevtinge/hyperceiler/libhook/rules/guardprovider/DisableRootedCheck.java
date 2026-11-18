@@ -21,15 +21,17 @@ package com.sevtinge.hyperceiler.libhook.rules.guardprovider;
 
 import com.sevtinge.hyperceiler.common.log.XposedLog;
 import com.sevtinge.hyperceiler.libhook.base.BaseHook;
-import io.github.lingqiqi5211.ezhooktool.xposed.java.IMethodHook;
 
 import org.luckypray.dexkit.query.FindMethod;
+import org.luckypray.dexkit.query.enums.StringMatchType;
 import org.luckypray.dexkit.query.matchers.MethodMatcher;
 
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.List;
 
 import io.github.lingqiqi5211.ezhooktool.xposed.common.HookParam;
+import io.github.lingqiqi5211.ezhooktool.xposed.java.IMethodHook;
 
 public class DisableRootedCheck extends BaseHook {
     private List<Method> mCheckRootMethods;
@@ -41,19 +43,37 @@ public class DisableRootedCheck extends BaseHook {
 
     @Override
     protected boolean initDexKit() {
-        mCheckRootMethods = requiredMemberList("CheckRoot", bridge -> bridge.findMethod(FindMethod.create()
+        mCheckRootMethods = optionalMemberList("RootManagerCheck", bridge -> bridge.findMethod(FindMethod.create()
+            .matcher(MethodMatcher.create()
+                .addUsingString("root manager found: ", StringMatchType.Equals)
+                .modifiers(Modifier.STATIC)
+                .paramTypes("com.miui.guardprovider.GuardApplication")
+                .returnType(boolean.class)
+            )));
+        if (mCheckRootMethods.size() == 1) {
+            return true;
+        }
+        if (!mCheckRootMethods.isEmpty()) {
+            XposedLog.w(TAG, getPackageName(), "Multiple root manager checks found: " + mCheckRootMethods.size());
+            return false;
+        }
+
+        mCheckRootMethods = optionalMemberList("CheckRoot", bridge -> bridge.findMethod(FindMethod.create()
             .matcher(MethodMatcher.create()
                 .usingStrings("/system/bin/")
                 .returnType(boolean.class)
             )));
+        if (mCheckRootMethods.isEmpty()) {
+            XposedLog.w(TAG, getPackageName(), "No root manager or legacy environment check found");
+            return false;
+        }
         return true;
     }
 
     @Override
     public void init() {
         for (Method method : mCheckRootMethods) {
-            // Method method = methodData.getMethodInstance(lpparam.classLoader);
-            XposedLog.d(TAG, getPackageName(), "Current hooking method is " + method);
+            XposedLog.d(TAG, getPackageName(), "Hooking environment check: " + method);
             hookMethod(method, new IMethodHook() {
                 @Override
                 public void before(HookParam param) {

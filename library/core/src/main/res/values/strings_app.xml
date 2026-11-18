@@ -1169,6 +1169,7 @@
     <!--System security components-->
     <string name="guard_provider_hyperos">System security components</string>
     <string name="guard_provider_disable_upload_applist">Prevent automatic upload of installed app list</string>
+    <string name="guard_provider_disable_upload_applist_desc">When enabled, full app-list scans will not receive cloud results.</string>
     <string name="guard_provider_disable_root_check">Disable environment check</string>
     <!--System launcher-->
     <string name="home_gesture">Gesture and navigation</string>
