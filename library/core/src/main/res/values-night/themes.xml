@@ -59,14 +59,14 @@
         <item name="actionBarBackground">@color/black</item>
     </style>
 
-    <style name="Base.Theme.HyperCeiler" parent="Theme.AppCompat.DayNight">
+    <style name="Base.Theme.HyperCeiler" parent="Theme.DayNight">
         <item name="android:forceDarkAllowed">false</item>
         <item name="android:actionBarItemBackground">@android:color/transparent</item>
         <item name="rebootIconColor">@color/white</item>
         <item name="SeekBarPreferenceCompatStyle">@style/Preference.SeekBarPreferenceCompat</item>
     </style>
 
-    <style name="Base.Theme.HyperCeiler.AprilFools" parent="Theme.AppCompat.DayNight">
+    <style name="Base.Theme.HyperCeiler.AprilFools" parent="Theme.DayNight">
         <item name="android:forceDarkAllowed">false</item>
         <item name="rebootIconColor">@color/white</item>
         <item name="SeekBarPreferenceCompatStyle">@style/Preference.SeekBarPreferenceCompat</item>

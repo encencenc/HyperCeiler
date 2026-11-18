@@ -40,8 +40,9 @@ public class SplashActivity extends AppCompatActivity {
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        if (AppCrashStore.hasPendingCrash(this)) {
-            startActivity(AppCrashStore.createIntent(this));
+        Intent report = AppCrashStore.takePendingIntent(this);
+        if (report != null) {
+            startActivity(report);
             finish();
             return;
         }

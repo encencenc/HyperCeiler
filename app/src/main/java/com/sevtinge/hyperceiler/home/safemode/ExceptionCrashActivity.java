@@ -53,12 +53,12 @@ public class ExceptionCrashActivity extends AppCompatActivity implements View.On
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
+        AppCrashStore.setShowingReport(true);
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_crash);
         getAppCompatActionBar().setTitle(getString(R.string.error));
 
         Intent intent = getIntent();
-        AppCrashStore.clear(this);
 
         String message = valueOrFallback(intent.getStringExtra("crash_message"), "Unknown");
         String exceptionType = valueOrFallback(intent.getStringExtra("crash_type"), "Unknown");
@@ -139,6 +139,13 @@ public class ExceptionCrashActivity extends AppCompatActivity implements View.On
         buildViews.setOnLongClickListener(this);
         messageViews.setOnLongClickListener(this);
         stackView.setOnLongClickListener(this);
+        AppCrashStore.clear(this);
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        AppCrashStore.setShowingReport(false);
     }
 
     @Override

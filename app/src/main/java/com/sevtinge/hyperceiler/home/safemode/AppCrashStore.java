@@ -34,10 +34,12 @@ public final class AppCrashStore {
     private static final String KEY_LINE = "line";
     private static final String KEY_STACK = "stack";
     private static final String KEY_TIME = "time";
+    private static volatile boolean sShowingReport;
 
     private AppCrashStore() {}
 
     public static void persist(Context context, Throwable throwable) {
+        if (sShowingReport) return;
         StackTraceElement[] stackTrace = throwable.getStackTrace();
         StackTraceElement first = stackTrace.length > 0 ? stackTrace[0] : null;
 
@@ -54,12 +56,12 @@ public final class AppCrashStore {
         editor.commit();
     }
 
-    public static boolean hasPendingCrash(Context context) {
-        return prefs(context).getBoolean(KEY_PENDING, false);
-    }
-
-    public static Intent createIntent(Context context) {
+    public static Intent takePendingIntent(Context context) {
         SharedPreferences prefs = prefs(context);
+        if (!prefs.getBoolean(KEY_PENDING, false)) return null;
+        // Consume the launch before inflating the report, even if the process dies there.
+        sShowingReport = true;
+        prefs.edit().remove(KEY_PENDING).commit();
         Intent intent = new Intent(context, ExceptionCrashActivity.class);
         intent.putExtra("crash_message", prefs.getString(KEY_MESSAGE, null));
         intent.putExtra("crash_type", prefs.getString(KEY_TYPE, null));
@@ -71,6 +73,10 @@ public final class AppCrashStore {
         intent.putExtra("crash_time", prefs.getLong(KEY_TIME, System.currentTimeMillis()));
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         return intent;
+    }
+
+    public static void setShowingReport(boolean showing) {
+        sShowingReport = showing;
     }
 
     public static void clear(Context context) {

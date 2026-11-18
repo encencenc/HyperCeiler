@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="LogViewerTheme" parent="Theme.AppCompat.DayNight">
+    <style name="LogViewerTheme" parent="Theme.DayNight">
         <item name="android:actionBarItemBackground">@android:color/transparent</item>
         <item name="android:windowBackground">@color/miuix_design_dark_default_color_surface_variant</item>
         <item name="android:windowTranslucentStatus">true</item>
