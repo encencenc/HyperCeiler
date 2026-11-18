@@ -41,6 +41,7 @@ import com.sevtinge.hyperceiler.common.base.BaseActivity;
 import com.sevtinge.hyperceiler.common.log.AndroidLog;
 import com.sevtinge.hyperceiler.common.widget.SearchEditText;
 import com.sevtinge.hyperceiler.log.db.LogRepository;
+import com.sevtinge.hyperceiler.utils.LogServiceUtils;
 
 import java.io.File;
 import java.util.ArrayList;
@@ -105,6 +106,7 @@ public class LogViewerActivity extends BaseActivity {
         super.onCreate();
         // The initial list refresh imports logs before launching health checking.
         // Do not run a second import or an early check from the Activity.
+        LogServiceUtils.init(this);
         initViews();
         setupTab();
         setupViewPager();

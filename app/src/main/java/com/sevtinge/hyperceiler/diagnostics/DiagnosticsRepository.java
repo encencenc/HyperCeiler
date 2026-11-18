@@ -26,6 +26,7 @@ public final class DiagnosticsRepository {
             try{
                 if(collect){
                     XposedLogLoader.syncLogsToDatabaseSync(context);
+                    com.sevtinge.hyperceiler.log.LogManager.startHealthCheck(context.getApplicationContext(), null);
                     // Capture failure is reported through the same private diagnostic DAO.
                     com.sevtinge.hyperceiler.log.LogcatLogLoader.syncHookDiagnostics(context,LogRepository.getInstance().getDao());
                 }

@@ -418,12 +418,12 @@ internal class DockGlassClient(private val rendererBroker: DockGlassRendererBrok
             homeMode = cursor.optInt(7)
         )
         if (snapshot == liveGeometry) { geometryFailReason = null; return true }
-        liveGeometry = snapshot
         // The provider answered from the settings file, so it is the most trustworthy source this
         // process has. Publishing the same values into PrefsBridge's hook cache is what makes the
         // *next* synchronous refreshSettings() - and every other DockGlass read - agree with it
         // instead of falling back to LSPosed's frozen snapshot.
         snapshot.applyToHookCache()
+        liveGeometry = snapshot
         // A successful read clears the last failure, so a later one is reported again instead of
         // being suppressed as a repeat of the same reason.
         geometryFailReason = null

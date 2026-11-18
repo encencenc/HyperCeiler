@@ -7,17 +7,18 @@ import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.content.res.XmlResourceParser;
 import android.graphics.Color;
+import android.os.Build;
 import android.text.TextUtils;
 
 import androidx.preference.PreferenceCategory;
 import androidx.preference.PreferenceGroup;
 import androidx.preference.PreferenceScreen;
 
+import com.sevtinge.hyperceiler.BuildConfig;
 import com.sevtinge.hyperceiler.common.log.AndroidLog;
 import com.sevtinge.hyperceiler.dashboard.DashboardFragment;
 import com.sevtinge.hyperceiler.home.HomePageFragment;
 import com.sevtinge.hyperceiler.hooker.home.HomeOS4EntryVisibility;
-import com.sevtinge.hyperceiler.libhook.utils.api.ThreadPoolManager;
 import com.sevtinge.hyperceiler.prefs.LayoutPreference;
 import com.sevtinge.hyperceiler.prefs.PreferenceHeader;
 import com.sevtinge.hyperceiler.search.data.AppDatabase;
@@ -29,10 +30,10 @@ import org.xmlpull.v1.XmlPullParser;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -44,53 +45,56 @@ public class SearchHelper {
     private static final String ANDROID_NS = "http://schemas.android.com/apk/res/android";
     private static final String APP_NS = "http://schemas.android.com/apk/res-auto";
 
-    private static final Set<Integer> REGISTERED = Collections.synchronizedSet(new HashSet<>());
+    private static final Set<Integer> REGISTERED = new HashSet<>();
+    private static String sLoadedSignature;
 
-    private static final Map<String, String> GROUP_PACKAGE_MAP = new LinkedHashMap<>();
+    private static volatile Map<String, String> sGroupPackages = Map.of();
 
-    private static final Map<String, Integer> GROUP_ICON_MAP = new LinkedHashMap<>();
+    private static volatile Map<String, Integer> sGroupIcons = Map.of();
 
     public static Map<String, String> getGroupPackageMap() {
-        return Collections.unmodifiableMap(GROUP_PACKAGE_MAP);
+        return sGroupPackages;
     }
 
     public static Map<String, Integer> getGroupIconMap() {
-        return Collections.unmodifiableMap(GROUP_ICON_MAP);
+        return sGroupIcons;
     }
 
-    public static void initIndex(Context context, boolean force) {
-        AndroidLog.d(TAG, "initIndex: force = " + force);
-        ThreadPoolManager.getInstance().submit(() -> {
-            ModDao dao = AppDatabase.getInstance(context).modDao();
-            if (force || dao.getCount() == 0) {
-                rebuildIndex(context, dao);
-            }
-        });
-    }
-
-    private static void rebuildIndex(Context context, ModDao dao) {
-        REGISTERED.clear();
-        Resources res = getLocaleResources(context);
-        List<ModEntity> entities = new ArrayList<>();
-
+    private static synchronized void ensureIndex(Context context, AppDatabase db, ModDao dao) {
+        Locale locale = LanguageHelper.getCurrentLocale(context);
         int headersXmlResId = HomePageFragment.getHomeHeadersResourceId();
         if (headersXmlResId == 0) {
             AndroidLog.e(TAG, "Home headers xml not found!");
             return;
         }
+        String signature = BuildConfig.BUILD_TIME + ':' + Build.FINGERPRINT + ':'
+            + locale.toLanguageTag() + ':' + headersXmlResId;
+        if (signature.equals(sLoadedSignature)) return;
 
-        scanHeaders(res, headersXmlResId, entities);
+        var prefs = context.getSharedPreferences("mod_search_index", Context.MODE_PRIVATE);
+        boolean rebuild = !signature.equals(prefs.getString("signature", null)) || dao.getCount() == 0;
+        List<ModEntity> entities = rebuild ? new ArrayList<>() : null;
+        Map<String, String> packages = new LinkedHashMap<>();
+        Map<String, Integer> icons = new LinkedHashMap<>();
+        REGISTERED.clear();
+        if (!scanHeaders(getLocaleResources(context, locale), headersXmlResId, entities, packages, icons)) return;
 
-        AppDatabase.getInstance(context).runInTransaction(() -> {
-            dao.deleteAll();
-            dao.insertAll(entities);
+        if (rebuild) {
+            db.runInTransaction(() -> {
+                dao.deleteAll();
+                dao.insertAll(entities);
+            });
+            prefs.edit().putString("signature", signature).apply();
             AndroidLog.d(TAG, "rebuildIndex: inserted " + entities.size() + " entries");
-        });
+        }
+
+        sGroupPackages = Map.copyOf(packages);
+        sGroupIcons = Map.copyOf(icons);
+        sLoadedSignature = signature;
     }
 
-    private static void scanHeaders(Resources res, int headersXmlResId, List<ModEntity> entities) {
-        GROUP_PACKAGE_MAP.clear();
-        GROUP_ICON_MAP.clear();
+    private static boolean scanHeaders(Resources res, int headersXmlResId, List<ModEntity> entities,
+                                       Map<String, String> packages, Map<String, Integer> icons) {
         try (XmlResourceParser xml = res.getXml(headersXmlResId)) {
             int eventType = xml.getEventType();
             while (eventType != XmlPullParser.END_DOCUMENT) {
@@ -108,16 +112,16 @@ public class SearchHelper {
                     int iconResId = resolveResId(iconAttr);
 
                     if (groupTitle != null && packageName != null) {
-                        GROUP_PACKAGE_MAP.put(groupTitle, packageName);
+                        packages.put(groupTitle, packageName);
                     }
                     if (groupTitle != null && iconResId > 0) {
-                        GROUP_ICON_MAP.put(groupTitle, iconResId);
+                        icons.put(groupTitle, iconResId);
                     }
 
-                    if (inflatedXml > 0) {
+                    if (entities != null && inflatedXml > 0) {
                         String frag = fragment != null ? fragment : DashboardFragment.class.getName();
                         scanEntryXml(res, frag, inflatedXml, groupTitle, groupTitle, entities);
-                    } else if (fragment != null) {
+                    } else if (entities != null && fragment != null) {
                         int xmlResId = getXmlResIdFromFragment(fragment);
                         if (xmlResId > 0) {
                             scanEntryXml(res, fragment, xmlResId, groupTitle, groupTitle, entities);
@@ -126,8 +130,10 @@ public class SearchHelper {
                 }
                 eventType = xml.next();
             }
+            return true;
         } catch (Throwable t) {
             AndroidLog.e(TAG, "Failed to scan home headers", t);
+            return false;
         }
     }
 
@@ -198,7 +204,9 @@ public class SearchHelper {
     public static List<ModEntity> search(Context context, String keyword) {
         if (TextUtils.isEmpty(keyword)) return new ArrayList<>();
         String trimmed = keyword.trim();
-        ModDao dao = AppDatabase.getInstance(context).modDao();
+        AppDatabase db = AppDatabase.getInstance(context);
+        ModDao dao = db.modDao();
+        ensureIndex(context, db, dao);
 
         // 中文（简体/繁体）按字模糊匹配，其它语言按词汇匹配
         if (containsChinese(trimmed)) {
@@ -221,15 +229,9 @@ public class SearchHelper {
         return false;
     }
 
-    public static void clearIndex() {
-        REGISTERED.clear();
-        GROUP_PACKAGE_MAP.clear();
-        GROUP_ICON_MAP.clear();
-    }
-
-    private static Resources getLocaleResources(Context context) {
+    private static Resources getLocaleResources(Context context, Locale locale) {
         Configuration config = new Configuration(context.getResources().getConfiguration());
-        config.setLocale(LanguageHelper.getCurrentLocale(context));
+        config.setLocale(locale);
         return context.createConfigurationContext(config).getResources();
     }
 

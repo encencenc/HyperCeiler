@@ -12,7 +12,7 @@ root=Path(__file__).resolve().parents[2];project=test_paths.TEST_DATA_ROOT
 cp=a.classpath
 a.output.mkdir(parents=True,exist_ok=True);out=a.output/'classes';out.mkdir(exist_ok=True)
 lib=root/'library/libhook/src/main/java/com/sevtinge/hyperceiler/libhook'
-sources=[lib/x for x in ['base/FrameworkHookGate.java','provider/HomeLayoutPrefsSnapshot.java','rules/home/dock/HomeLayoutNativeEndpointOS4.java','rules/home/dock/HomeDockWindow.kt']]
+sources=[lib/x for x in ['base/FrameworkHookGate.java','provider/HomeLayoutPrefsSnapshot.java','utils/api/ContextUtils.java','rules/home/dock/HomeLayoutNativeEndpointOS4.java','rules/home/dock/HomeDockWindow.kt']]
 jdk=test_paths.JAVA_HOME / 'bin';kh=test_paths.KOTLIN_HOME
 friends=test_paths.SNAPSHOT_ROOT / 'source-os4-hyos-test4-20261009/library/libhook/build/intermediates/built_in_kotlinc/debug/compileDebugKotlin/classes'
 commands=[

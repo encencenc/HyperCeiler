@@ -29,7 +29,6 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 
 import com.sevtinge.hyperceiler.R;
 import com.sevtinge.hyperceiler.common.log.AndroidLog;
-import com.sevtinge.hyperceiler.common.log.LogStatusManager;
 import com.sevtinge.hyperceiler.home.adapter.HeaderAdapter;
 import com.sevtinge.hyperceiler.home.adapter.ProxyHeaderViewAdapter;
 import com.sevtinge.hyperceiler.home.banner.BannerCallback;
@@ -271,8 +270,6 @@ public class HomePageFragment extends BasePreferenceFragment implements OnComple
         if (mBannerCallback == null) {
             mBannerCallback = new BannerCallback();
         }
-
-        LogStatusManager.onHealthCheckDone(this::scheduleHeaderRefresh);
     }
 
     @Override

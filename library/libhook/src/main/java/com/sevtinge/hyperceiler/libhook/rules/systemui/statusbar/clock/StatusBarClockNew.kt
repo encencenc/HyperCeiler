@@ -54,7 +54,7 @@ object StatusBarClockNew : BaseHook() {
 
     private val ssRegex by lazy { Regex("(ss|s)") }
 
-    private val secondsFrameCallback = SecondsFrameCallback().initial()
+    private val secondsFrameCallback by lazy { SecondsFrameCallback() }
 
     private val updateTimeMethodCache = ConcurrentHashMap<Class<*>, Method>()
 
@@ -217,12 +217,17 @@ object StatusBarClockNew : BaseHook() {
             }
         }
 
-        BaseHook.getHotReloadRuntimeState(STATE_CLOCK_VIEW, TextView::class.java)
-            ?.let { clock ->
-                runCatching { findMethodInHierarchy(clock.javaClass, "updateTime") }
-                    .getOrNull()
-                    ?.let { secondsFrameCallback.registerClock(clock, it) }
+        BaseHook.getHotReloadRuntimeState(STATE_CLOCK_VIEW, TextView::class.java)?.let { clock ->
+            runCatching {
+                if (showsSeconds(clock.resources.getResourceEntryName(clock.id))) {
+                    findMethodInHierarchy(clock.javaClass, "updateTime")?.let {
+                        secondsFrameCallback.registerClock(clock, it)
+                    }
+                } else {
+                    BaseHook.putHotReloadRuntimeState(STATE_CLOCK_VIEW, null)
+                }
             }
+        }
 
         Constructors.find(statusBarClass)
             .filterByParamCount(3)
@@ -233,17 +238,6 @@ object StatusBarClockNew : BaseHook() {
                     val miuiClock = param.thisObject as TextView
                     val miuiClockName = miuiClock.resources.getResourceEntryName(miuiClock.id)
                         ?: return@createAfterHook
-
-                    val isSec = setOf(
-                        ssRegex.containsMatchIn(getFormatS) && isSync && miuiClockName == "clock",
-                        ssRegex.containsMatchIn(getFormatS) && !isSync && miuiClockName in setOf(
-                            "clock",
-                            "big_time"
-                        ),
-                        ssRegex.containsMatchIn(getFormatB) && isSync && miuiClockName == "big_time",
-                        ssRegex.containsMatchIn(getFormatN) && miuiClockName == "date_time",
-                        ssRegex.containsMatchIn(getFormatP) && miuiClockName == "pad_clock"
-                    ).any { it }
 
                     // miuiClockName 内部标签分类如下
                     // clock 竖屏状态栏时钟
@@ -264,7 +258,7 @@ object StatusBarClockNew : BaseHook() {
                     if (getClockStyle != 0 && miuiClockName == "clock")
                         miuiClock.isSingleLine = false
 
-                    if (isSec) {
+                    if (showsSeconds(miuiClockName)) {
                         val updateTimeMethod =
                             updateTimeMethodCache.computeIfAbsent(miuiClock.javaClass) { cls ->
                                 runCatching {
@@ -292,6 +286,14 @@ object StatusBarClockNew : BaseHook() {
                 }
             }
         }
+    }
+
+    private fun showsSeconds(name: String): Boolean = when (name) {
+        "clock" -> ssRegex.containsMatchIn(getFormatS)
+        "big_time" -> ssRegex.containsMatchIn(if (isSync) getFormatB else getFormatS)
+        "date_time" -> ssRegex.containsMatchIn(getFormatN)
+        "pad_clock" -> !isHidePClock && ssRegex.containsMatchIn(getFormatP)
+        else -> false
     }
 
     private fun applyMiuiClockStyleAndFormat(hook: HookParam) {
@@ -489,115 +491,78 @@ object StatusBarClockNew : BaseHook() {
     }
 
     private class SecondsFrameCallback : Choreographer.FrameCallback {
-        // Do NOT touch Choreographer here. `Choreographer.getInstance()` reads the current
-        // thread's Looper and throws IllegalStateException("The current thread must have a
-        // looper!") when there is none. `init()` runs on the LSPosed hooking thread (a plain
-        // Binder thread, no Looper), so a field initializer or a postFrameCallback call at
-        // construction time kills the whole StatusBarClockNew hook on hot reload. Resolve the
-        // Choreographer lazily and always touch it from the main thread.
-        @Volatile
-        private var choreographer: Choreographer? = null
-
-        @Volatile
+        // Registry and scheduling belong to the main thread; a retired callback cannot re-arm.
+        @Volatile private var disposed = false
         private var scheduled = false
+        private val clocks = WeakHashMap<TextView, Method>()
+        private val attached = Collections.newSetFromMap(WeakHashMap<TextView, Boolean>())
 
-        private val clockMap = HashMap<TextView, Method>()
-
-        /**
-         * Bind to the main thread's Choreographer and start the per-second tick.
-         * Safe to call from any thread: the actual work is posted to the main Looper.
-         */
-        fun initial(): SecondsFrameCallback {
-            runOnMainThread {
-                val target = Choreographer.getInstance()
-                choreographer = target
-                if (!scheduled) {
-                    scheduled = true
-                    target.postFrameCallback(this)
-                }
+        private val attachment = object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(view: View) {
+                if (disposed || view !is TextView) return
+                attached.add(view)
+                BaseHook.putHotReloadRuntimeState(STATE_CLOCK_VIEW, view)
+                updateSchedule()
             }
-            return this
+
+            override fun onViewDetachedFromWindow(view: View) {
+                if (view !is TextView) return
+                attached.remove(view)
+                if (!disposed && BaseHook.getHotReloadRuntimeState(STATE_CLOCK_VIEW, TextView::class.java) === view) {
+                    BaseHook.putHotReloadRuntimeState(STATE_CLOCK_VIEW, attached.firstOrNull())
+                }
+                updateSchedule()
+            }
         }
 
         fun dispose() {
+            disposed = true
             runOnMainThread {
-                scheduled = false
-                choreographer?.removeFrameCallback(this)
+                updateSchedule()
+                clocks.keys.forEach { it.removeOnAttachStateChangeListener(attachment) }
+                attached.clear()
+                clocks.clear()
             }
-            clockMap.clear()
         }
 
         override fun doFrame(frameTimeNanos: Long) {
-            // FrameCallback is delivered on the main thread, so the Looper is guaranteed here.
-            val target = choreographer ?: return
-
-            if (clockMap.isEmpty()) {
-                scheduleNext(target)
-                return
+            scheduled = false
+            if (disposed) return
+            for (view in attached) {
+                if (view.isShown) runCatching { clocks[view]?.invoke(view) }
             }
-
-            for (entry in clockMap) {
-                val view = entry.key
-                val method = entry.value
-                if (!view.isAttachedToWindow)
-                    continue
-
-                runCatching {
-                    method.invoke(view)
-                }
-            }
-
-            scheduleNext(target)
+            updateSchedule()
         }
 
-        private fun scheduleNext(target: Choreographer) {
-            target.postFrameCallbackDelayed(
-                this,
-                1000 - (System.currentTimeMillis() % 1000)
-            )
+        private fun updateSchedule() {
+            val needed = !disposed && attached.isNotEmpty()
+            if (needed == scheduled) return
+            val target = Choreographer.getInstance()
+            scheduled = needed
+            if (needed) {
+                target.postFrameCallbackDelayed(this, 1000 - (System.currentTimeMillis() % 1000))
+            } else {
+                target.removeFrameCallback(this)
+            }
         }
 
         fun registerClock(textView: TextView, updateTimeMethod: Method) {
-            if (!clockMap.contains(textView)) {
-                updateTimeMethod.isAccessible = true
-                clockMap[textView] = updateTimeMethod
-                BaseHook.putHotReloadRuntimeState(STATE_CLOCK_VIEW, textView)
-                val listener = object : View.OnAttachStateChangeListener {
-                    override fun onViewAttachedToWindow(v: View) {}
-
-                    override fun onViewDetachedFromWindow(v: View) {
-                        clockMap.remove(v)
-                        v.removeOnAttachStateChangeListener(this)
-                        if (BaseHook.getHotReloadRuntimeState(STATE_CLOCK_VIEW, TextView::class.java) === v) {
-                            BaseHook.putHotReloadRuntimeState(STATE_CLOCK_VIEW, null)
-                        }
-                    }
-                }
-                textView.addOnAttachStateChangeListener(listener)
-                BaseHook.registerHotReloadCleanup {
-                    textView.removeOnAttachStateChangeListener(listener)
-                }
+            runOnMainThread {
+                if (disposed || clocks.containsKey(textView)) return@runOnMainThread
+                if (runCatching { updateTimeMethod.isAccessible = true }.isFailure) return@runOnMainThread
+                clocks[textView] = updateTimeMethod
+                textView.addOnAttachStateChangeListener(attachment)
+                if (textView.isAttachedToWindow) attachment.onViewAttachedToWindow(textView)
             }
         }
 
-        /**
-         * Run [block] on the main thread. Falls back to an inline call when the Looper is
-         * already ours; otherwise posts (and falls back to [Choreographer]'s own post path if
-         * the main Looper is not ready yet, which can happen during very early boot).
-         */
         private fun runOnMainThread(block: () -> Unit) {
-            val mainLooper = Looper.getMainLooper()
-            if (mainLooper == null) {
-                // Main Looper unavailable (extremely early boot): defer via the handler-less
-                // path instead of throwing on this thread.
-                runCatching { block() }
-                return
-            }
+            val mainLooper = Looper.getMainLooper() ?: return
             if (mainLooper == Looper.myLooper()) {
                 block()
-                return
+            } else {
+                Handler(mainLooper).post { block() }
             }
-            Handler(mainLooper).post { runCatching { block() } }
         }
     }
 }

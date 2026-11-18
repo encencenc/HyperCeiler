@@ -45,7 +45,6 @@ import com.sevtinge.hyperceiler.common.utils.PrefsBridge;
 import com.sevtinge.hyperceiler.common.utils.api.ProjectApi;
 import com.sevtinge.hyperceiler.home.utils.HeaderManager;
 import com.sevtinge.hyperceiler.libhook.utils.api.BackupUtils;
-import com.sevtinge.hyperceiler.search.SearchHelper;
 import com.sevtinge.hyperceiler.sub.ScopePickerActivity;
 import com.sevtinge.hyperceiler.ui.LauncherActivity;
 import com.sevtinge.hyperceiler.ui.SplashActivity;
@@ -178,7 +177,6 @@ public class SettingsFragment extends BasePreferenceFragment
         mLanguage.setOnPreferenceChangeListener((preference, o) -> {
             int index = Integer.parseInt((String) o);
             LanguageHelper.setIndexLanguage(getActivity(), index, true);
-            SearchHelper.initIndex(requireContext(), true);
             return true;
         });
 
@@ -287,7 +285,6 @@ public class SettingsFragment extends BasePreferenceFragment
                         AppSettingsStore.resetGlobalToDefaults(requireContext());
                         OobeUtils.resetOobeState(requireContext());
                         LanguageHelper.clearLanguage(requireContext());
-                        SearchHelper.initIndex(requireContext(), true);
                         Toast.makeText(getActivity(), com.sevtinge.hyperceiler.core.R.string.reset_okay, Toast.LENGTH_LONG).show();
                     }
                 );

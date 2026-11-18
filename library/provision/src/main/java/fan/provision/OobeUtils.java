@@ -27,11 +27,13 @@ import android.content.res.Configuration;
 import android.provider.Settings;
 import android.text.TextUtils;
 import android.util.LayoutDirection;
-import com.sevtinge.hyperceiler.common.log.ModuleLog;
 import android.view.View;
 import android.view.Window;
 import android.widget.Toast;
 
+import com.sevtinge.hyperceiler.common.log.ModuleLog;
+import com.sevtinge.hyperceiler.common.utils.prefs.PrefType;
+import com.sevtinge.hyperceiler.common.utils.prefs.PrefsChangeObserver;
 import com.sevtinge.hyperceiler.provision.R;
 
 import java.security.SecureRandom;
@@ -93,9 +95,18 @@ public class OobeUtils {
 
     public static void syncHookAvailability(Context context, boolean allowHook) {
         Context protectedContext = context.createDeviceProtectedStorageContext();
-        protectedContext.getSharedPreferences(PREF_HOOK_STATE, Context.MODE_PRIVATE).edit()
-            .putBoolean(KEY_ALLOW_HOOK, allowHook)
-            .apply();
+        SharedPreferences prefs = protectedContext.getSharedPreferences(PREF_HOOK_STATE, Context.MODE_PRIVATE);
+        try {
+            if (prefs.contains(KEY_ALLOW_HOOK) && prefs.getBoolean(KEY_ALLOW_HOOK, false) == allowHook) return;
+        } catch (ClassCastException invalid) { /* Replace the malformed value. */ }
+        prefs.edit().putBoolean(KEY_ALLOW_HOOK, allowHook).apply();
+        // Provisioning writes the physical file directly, bypassing PrefsBridge notifications.
+        try {
+            protectedContext.getContentResolver().notifyChange(
+                PrefsChangeObserver.PrefToUri.anyPrefToUri(PrefType.Boolean, KEY_ALLOW_HOOK), null);
+        } catch (RuntimeException unavailable) {
+            ModuleLog.e(TAG, "Could not notify hook availability change", unavailable);
+        }
     }
 
     public static boolean isRTL() {

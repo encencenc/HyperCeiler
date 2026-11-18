@@ -44,8 +44,11 @@ object CheckModifyUtils {
      * 仅允许在应用进程调用，写入后由应用侧同步到 Hook 进程。
      */
     fun setCheckResult(pkg: String, isModified: Boolean) {
-        clearCheckResult(pkg)
-        PrefsBridge.putByApp("debug_mode_$pkg", isModified)
+        val key = "debug_mode_$pkg"
+        val previous = try { PrefsBridge.getBoolean(key, false) } catch (_: ClassCastException) { null }
+        if (previous != isModified) {
+            PrefsBridge.putByApp(key, isModified)
+        }
     }
 
     /**

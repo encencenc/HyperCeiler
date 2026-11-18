@@ -976,27 +976,12 @@ bool TryDiscoverImage() {
 }
 
 uint64_t MonitorPeriodMs(const State& state) {
-    /*
-     * The period is a *policy*, and it has exactly two values.
-     *
-     * 1500 ms - the steady cadence. Taken when there is nothing left to do, and equally when
-     *           the runtime is knowingly stuck: a restore that could not complete, or a write
-     *           that keeps failing. Those states are unfinished, but re-attempting them at the
-     *           start-up rate changes nothing. During boot the target image is still being
-     *           relocated, so an unfinished pass cannot converge no matter how often it runs -
-     *           and running it twenty times a second is what starves the launcher main thread of
-     *           g_workMutex and keeps the desktop off the screen. A stuck state is therefore
-     *           retried on the *slow* cadence, not the fast one.
-     * 50 ms   - the applying cadence, once the image AND configuration are present.
-     *           Missing prerequisites use 1500 ms too; load/config notifications wake
-     *           the worker without waiting for that fallback deadline.
-     */
-    // A missing/unsupported image or absent config may never arrive. Library
-    // notification and pushed config already wake this worker immediately;
-    // there is no reason to poll /proc and take the work mutex at 20 Hz forever.
+    // Load/config notifications wake the worker. Keep the existing fallback and recovery
+    // cadences, but an unpatched, settled runtime need only sample its diagnostics.
     if (!state.imageFound || !state.configLoaded) return 1500;
-    if (!state.repatchNeeded) return 1500;
     if (state.restoreBlocked || state.writeRetryPending) return 1500;
+    if (!state.repatchNeeded)
+        return state.applied.empty() && !config_blob_channel_enabled() ? 5000 : 1500;
     return 50;
 }
 
@@ -1032,7 +1017,7 @@ void MonitorLoop() {
              * The check is affordable at that rate because RefreshConfigLocked is now a stat() of
              * the candidates unless one of them actually changed.
              */
-            if (!state->configLoaded || now >= nextConfigCheck) {
+            if (config_blob_channel_enabled() && (!state->configLoaded || now >= nextConfigCheck)) {
                 nextConfigCheck = now + (state->configLoaded ? 500 : 100);
                 RefreshConfigLocked(state, true, false);
             }

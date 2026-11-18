@@ -20,7 +20,10 @@ package com.sevtinge.hyperceiler.libhook.utils.api;
 
 import android.annotation.SuppressLint;
 import android.app.Application;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 
 import androidx.annotation.IntDef;
 import androidx.annotation.Nullable;
@@ -66,6 +69,24 @@ public class ContextUtils {
             // AndroidLog.e(TAG, "getContext: ", e);
             return null;
         }
+    }
+
+    /** Returns an unregister action, or null when screen-on observation is unavailable. */
+    @Nullable
+    public static Runnable observeScreenOn(Context context, Runnable callback) {
+        BroadcastReceiver receiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context context, Intent intent) {
+                if (Intent.ACTION_SCREEN_ON.equals(intent.getAction())) callback.run();
+            }
+        };
+        try {
+            context.registerReceiver(receiver, new IntentFilter(Intent.ACTION_SCREEN_ON),
+                Context.RECEIVER_NOT_EXPORTED);
+            return () -> {
+                try { context.unregisterReceiver(receiver); }
+                catch (RuntimeException unavailable) { /* Already unregistered. */ }
+            };
+        } catch (RuntimeException unavailable) { return null; }
     }
 
     /**

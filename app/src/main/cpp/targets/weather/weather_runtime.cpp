@@ -101,32 +101,40 @@ bool query(weather_snapshot::Words &words) {
     return valid;
 }
 
-void poll() {
+bool poll() {
     weather_snapshot::Words words{};
     const auto began = now();
     const bool received = query(words);
     const auto ended = now();
     const bool timely = received && began > 0 && ended >= began
         && ended - began < weather_snapshot::kMaxLeaseNanos;
+    bool valid = false;
     if (!timely || g_stop.load(std::memory_order_acquire)) g_cache.revoke();
-    else g_cache.publish(words, ended);
+    else valid = g_cache.publish(words, ended);
     // Reuse this one HWS worker. Card maintenance only checks ownership and
     // publishes an absolute lease; it never installs or repairs live Dart code.
     weather_card_runtime::service();
-    {
-        std::lock_guard lock(g_initial_mutex);
-        g_initial_completed = true;
-    }
-    g_initial_condition.notify_all();
+    return valid && words[1] == 0;
 }
 
 void *worker(void *) {
     // A stuck Binder call keeps this one worker; there is no replacement worker
     // and no renewal from receipt time. Hook reads independently enforce expiry.
+    bool initial = true;
     while (!g_stop.load(std::memory_order_acquire)) {
-        poll();
+        const bool pending = poll();
         if (g_stop.load(std::memory_order_acquire)) break;
-        timespec remaining{1, 500'000'000};
+        if (initial && !pending) {
+            {
+                std::lock_guard lock(g_initial_mutex);
+                g_initial_completed = true;
+            }
+            g_initial_condition.notify_all();
+            initial = false;
+        }
+        // A valid but unavailable reply can have woken a dormant provider worker.
+        // Retry only during the existing startup wait, not on the rendering thread.
+        timespec remaining = initial ? timespec{0, 150'000'000} : timespec{1, 500'000'000};
         while (nanosleep(&remaining, &remaining) != 0 && errno == EINTR) {}
     }
     return nullptr;

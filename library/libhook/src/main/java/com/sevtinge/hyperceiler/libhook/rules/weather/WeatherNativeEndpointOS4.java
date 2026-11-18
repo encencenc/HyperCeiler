@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 package com.sevtinge.hyperceiler.libhook.rules.weather;
 
+import android.content.ContentResolver;
 import android.content.Context;
+import android.database.ContentObserver;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Binder;
@@ -31,13 +33,9 @@ public final class WeatherNativeEndpointOS4 {
      * fresher lease it buys. 30 s is the cap this class already uses for provider failure.
      */
     private static final long DOZE_REFRESH_MS = 30000;
-    /**
-     * Idle periods are slept in slices this long so the first interactive cycle, and with it the
-     * first lease the wake can use, starts within a slice of the wake rather than up to
-     * {@link #DOZE_REFRESH_MS} after it. A slice is a local read of this process's own power
-     * service, which is what keeps a 20x reduced idle cadence from costing a stale card at unlock.
-     */
-    private static final long IDLE_SLICE_MS = 1000;
+    private static final long FALLBACK_SCREEN_CHECK_MS = 1000;
+    private static final String PREFS_ROOT = "content://com.sevtinge.hyperceiler.provider.sharedprefs";
+    private static final String PREFS_CHANGES = PREFS_ROOT + "/pref";
     private static final String PACKAGE = "com.miui.weather2";
     private static final String[][] SPECS = WeatherPrefsSnapshot.specs();
     private static final Object WORKER_LOCK = new Object();
@@ -53,6 +51,9 @@ public final class WeatherNativeEndpointOS4 {
     private long epoch;
     private long revision;
     private long ticket;
+    private long changeVersion;
+    private long screenWakeVersion;
+    private volatile boolean dormant;
 
     @FunctionalInterface interface CallerVerifier { boolean isWeather(int uid, int pid); }
     private record Values(int level, int card, int blur, boolean allow, boolean frameworkAllow,
@@ -64,7 +65,7 @@ public final class WeatherNativeEndpointOS4 {
     public WeatherNativeEndpointOS4() { this(WeatherNativeEndpointOS4::verifyWeatherProcess); }
     WeatherNativeEndpointOS4(CallerVerifier verifier) { this.verifier = verifier; }
 
-    /** Install routing first. Neither receive nor readSnapshot starts or waits for this worker. */
+    /** Install routing first. Requests can signal, but never start or wait for this worker. */
     public void startPrefetch() {
         synchronized (WORKER_LOCK) {
             if (retired || (owner != null && owner != this && !owner.retired)) return;
@@ -76,8 +77,6 @@ public final class WeatherNativeEndpointOS4 {
         }
     }
 
-    // Owner changes are lifecycle transitions between endpoint instances, irrespective of equality.
-    @SuppressWarnings("PMD.CompareObjectsWithEquals")
     private static boolean screenInteractive() {
         try {
             android.os.PowerManager manager = powerManager;
@@ -96,24 +95,6 @@ public final class WeatherNativeEndpointOS4 {
     }
 
     /**
-     * Sleep a period, but in {@link #IDLE_SLICE_MS} slices while the panel is non-interactive, so an
-     * owner change (which interrupts this thread) and the first interactive cycle both take effect on
-     * the next slice rather than after the whole idle period.
-     */
-    private static void sleepWithIdleGate(long delay) throws InterruptedException {
-        if (delay <= IDLE_SLICE_MS || screenInteractive()) {
-            Thread.sleep(delay);
-            return;
-        }
-        long remaining = delay;
-        while (remaining > 0) {
-            Thread.sleep(Math.min(remaining, IDLE_SLICE_MS));
-            if (screenInteractive()) return;
-            remaining -= IDLE_SLICE_MS;
-        }
-    }
-
-    /**
      * Cadence for the next cycle: the retry ladder is exactly what it was while the panel is
      * interactive, and doze only raises the floor to {@link #DOZE_REFRESH_MS}.
      */
@@ -124,7 +105,6 @@ public final class WeatherNativeEndpointOS4 {
     }
 
     private static void workerLoop() {
-        long delay = ACTIVE_REFRESH_MS;
         try {
             for (;;) {
                 final WeatherNativeEndpointOS4 current;
@@ -133,11 +113,7 @@ public final class WeatherNativeEndpointOS4 {
                     if (current == null) return;
                 }
                 Thread.interrupted();
-                // The failure ladder is unchanged while the panel is interactive; doze only lifts
-                // the floor, and the slice loop below returns early the moment it stops being doze.
-                delay = nextDelay(delay, current.refreshFromProvider(), screenInteractive());
-                synchronized (WORKER_LOCK) { if (owner != current) continue; }
-                try { sleepWithIdleGate(delay); } catch (InterruptedException changedOwner) { }
+                current.runPrefetch();
             }
         } finally {
             synchronized (WORKER_LOCK) {
@@ -148,6 +124,104 @@ public final class WeatherNativeEndpointOS4 {
                 }
             }
         }
+    }
+
+    private void runPrefetch() {
+        ContentResolver resolver = null;
+        ContentObserver observer = null;
+        Runnable unregisterScreenObserver = null;
+        long delay = ACTIVE_REFRESH_MS;
+        try {
+            try {
+                Context context = ContextUtils.getContextNoError(ContextUtils.FlAG_ONLY_ANDROID);
+                if (context != null) {
+                    unregisterScreenObserver = ContextUtils.observeScreenOn(context, () -> {
+                        synchronized (lock) {
+                            ++screenWakeVersion;
+                            lock.notifyAll();
+                        }
+                    });
+                    resolver = context.getContentResolver();
+                }
+                if (resolver != null) {
+                    ContentObserver candidate = new ContentObserver(null) {
+                        @Override public void onChange(boolean selfChange, Uri uri) {
+                            if (isWeatherChange(uri)) onPreferencesChanged();
+                        }
+                    };
+                    resolver.registerContentObserver(Uri.parse(PREFS_CHANGES), true, candidate);
+                    observer = candidate;
+                }
+            } catch (RuntimeException | Error unavailable) { /* Keep the timed fallback. */ }
+            while (!retired) {
+                final long beforeChange;
+                final long beforeWake;
+                synchronized (lock) {
+                    beforeChange = changeVersion;
+                    beforeWake = screenWakeVersion;
+                }
+                final boolean success = refreshFromProvider();
+                final boolean interactive = screenInteractive();
+                synchronized (lock) {
+                    if (retired) return;
+                    if (changeVersion != beforeChange) continue;
+                    Published value = published;
+                    if (success && observer != null && value != null && value.values() != null
+                            && !needsRenewal(value.values())) {
+                        dormant = true;
+                        while (dormant && !retired && changeVersion == beforeChange) lock.wait();
+                        dormant = false;
+                        continue;
+                    }
+                    delay = nextDelay(delay, success, interactive);
+                    if (screenWakeVersion != beforeWake) continue;
+                    if (unregisterScreenObserver != null || interactive) {
+                        lock.wait(delay);
+                    } else {
+                        long remaining = delay;
+                        while (remaining > 0 && !retired && changeVersion == beforeChange) {
+                            long slice = Math.min(remaining, FALLBACK_SCREEN_CHECK_MS);
+                            lock.wait(slice);
+                            if (screenInteractive()) break;
+                            remaining -= slice;
+                        }
+                    }
+                }
+            }
+        } catch (InterruptedException cancelled) {
+            Thread.currentThread().interrupt();
+        } finally {
+            if (unregisterScreenObserver != null) unregisterScreenObserver.run();
+            if (resolver != null && observer != null) {
+                try { resolver.unregisterContentObserver(observer); }
+                catch (RuntimeException | Error unavailable) { /* Provider may already be gone. */ }
+            }
+        }
+    }
+
+    private static boolean isWeatherChange(Uri uri) {
+        if (uri == null || PREFS_CHANGES.equals(uri.toString())) return true;
+        final String path = uri.toString();
+        final String segment = path.substring(path.lastIndexOf('/') + 1);
+        final String key = segment.startsWith("prefs_key_") ? segment.substring("prefs_key_".length()) : segment;
+        for (String[] spec : SPECS) {
+            if (key.equals(spec[1])) return true;
+        }
+        return false;
+    }
+
+    private void onPreferencesChanged() {
+        synchronized (lock) {
+            if (retired) return;
+            ++changeVersion;
+            if (ticket != Long.MAX_VALUE) ++ticket;
+            invalidateLocked();
+            lock.notifyAll();
+        }
+    }
+
+    private static boolean needsRenewal(Values value) {
+        return value.allow() && (value.level() != 3 || value.card() != 0 || value.blur() != 0);
     }
 
     /** Permanent retirement: an old query can never reactivate this generation. No blocking join. */
@@ -194,13 +268,14 @@ public final class WeatherNativeEndpointOS4 {
         if (started <= 0 || started > Long.MAX_VALUE - LEASE_NS) return false;
         Values values = queryProviderValues();
         if (values == null) return false;
-        long nonce = UUID.randomUUID().getMostSignificantBits() & Long.MAX_VALUE;
-        if (nonce == 0) nonce = 1;
+        Published previous = published;
+        long initialEpoch = previous == null
+            ? Math.max(1, UUID.randomUUID().getMostSignificantBits() & Long.MAX_VALUE) : previous.epoch();
         synchronized (lock) {
             long now = SystemClock.elapsedRealtimeNanos();
             if (retired || ticket != attempt || revision == Long.MAX_VALUE
                 || now < started || now >= started + LEASE_NS) return false;
-            if (epoch == 0) epoch = nonce;
+            if (epoch == 0) epoch = initialEpoch;
             published = new Published(values, epoch, ++revision, started + LEASE_NS);
         }
         return true;
@@ -210,8 +285,7 @@ public final class WeatherNativeEndpointOS4 {
         final Context context = ContextUtils.getContextNoError(ContextUtils.FlAG_ONLY_ANDROID);
         if (context == null || context.getContentResolver() == null) return null;
         Object[] row = new Object[SPECS.length];
-        try (Cursor cursor = context.getContentResolver().query(Uri.parse(
-                "content://com.sevtinge.hyperceiler.provider.sharedprefs/weather_config"),
+        try (Cursor cursor = context.getContentResolver().query(Uri.parse(PREFS_ROOT + "/weather_config"),
                 null, null, null, null)) {
             if (!isProviderSchema(cursor)) return null;
             for (int i = 0; i < SPECS.length; i++) {
@@ -313,7 +387,16 @@ public final class WeatherNativeEndpointOS4 {
         int uid = Binder.getCallingUid();
         int pid = Binder.getCallingPid();
         if (uid < 10000 || pid <= 0 || !verifier.isWeather(uid, pid)) return unavailable(null);
-        return readSnapshot();
+        Snapshot result = readSnapshot();
+        if (result.available() == 0 && dormant) {
+            synchronized (lock) {
+                if (dormant) {
+                    dormant = false;
+                    lock.notifyAll();
+                }
+            }
+        }
+        return result;
     }
 
     /** Fixed wire, neutral default level=3 (level=0 would incorrectly force low). */

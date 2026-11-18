@@ -7,10 +7,11 @@ public class ContentResolver {
     public static boolean recentHeaderExtras = false;
     public static boolean recentDismissExtras = false;
     private static String[][] specs = new String[0][];
-    private static int failureIndex = -1, queries;
+    private static int failureIndex = -1;
+    private static volatile int queries;
     private static String failureMode;
     private static boolean wrongSchema, emptyBatch;
-    private static android.database.ContentObserver observer;
+    private static volatile android.database.ContentObserver observer;
     private static String observedUri;
     private static int registrations, unregistrations;
     public static java.util.function.Consumer<String> afterRead;

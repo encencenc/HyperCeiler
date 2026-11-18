@@ -28,6 +28,7 @@ import com.sevtinge.hyperceiler.common.log.AndroidLog;
 import com.sevtinge.hyperceiler.common.log.LogStatusManager;
 import com.sevtinge.hyperceiler.home.safemode.AppCrashStore;
 import com.sevtinge.hyperceiler.home.safemode.CrashRecordStore;
+import com.sevtinge.hyperceiler.home.banner.HomePageBannerManager;
 import com.sevtinge.hyperceiler.log.db.LogEntry;
 import com.sevtinge.hyperceiler.log.db.LogRepository;
 import com.sevtinge.hyperceiler.utils.ScopeManager;
@@ -127,6 +128,10 @@ public class LogManager {
                         null
                     );
                     sStatusManagerInitialized = true;
+                    LogStatusManager.onHealthCheckDone(() -> {
+                        HomePageBannerManager.invalidateCache();
+                        HomePageBannerManager.requestRefresh();
+                    });
                 }
             }
         }

@@ -26,7 +26,7 @@ public class WeatherBridgeTest {
  static Object get(Object obj,String n){try{var f=WeatherNativeEndpointOS4.class.getDeclaredField(n);f.setAccessible(true);return f.get(obj);}catch(Exception e){throw new AssertionError(e);}}
  static WeatherNativeEndpointOS4 endpoint(){var e=new WeatherNativeEndpointOS4((u,p)->u==10100&&p==42);endpoints.add(e);return e;}
  static void clean(){for(var e:endpoints)e.retire();endpoints.clear();for(var c:BaseHook.cleanups)c.run();BaseHook.cleanups.clear();for(Thread w:Thread.getAllStackTraces().keySet())if(w.getName().equals("hc-weather-prefs"))join(w);}
- static void reset(){clean();ContentResolver.values=Map.of();ContentResolver.failure="";ContentResolver.afterSnapshot=()->{};ContentResolver.mutate=c->{};ContentResolver.missing=false;ContentResolver.queries.set(0);ContentResolver.reads.set(0);ContentResolver.max.set(0);ContentResolver.inflight.set(0);ContextUtils.missing=false;BaseLoad.resetFrameworkForTest();BaseHook.callback=null;BaseHook.failInstall=false;PackageManager.packages=new String[]{"com.miui.weather2"};PackageManager.fail=false;Binder.setCallingIdentityForTest(10100,42);now.set(10_000_000_000L);SystemClock.source=now::get;}
+ static void reset(){clean();ContentResolver.values=Map.of();ContentResolver.failure="";ContentResolver.afterSnapshot=()->{};ContentResolver.mutate=c->{};ContentResolver.missing=false;ContentResolver.queries.set(0);ContentResolver.reads.set(0);ContentResolver.max.set(0);ContentResolver.inflight.set(0);ContextUtils.missing=false;PowerManager.interactive=true;BaseLoad.resetFrameworkForTest();BaseHook.callback=null;BaseHook.failInstall=false;PackageManager.packages=new String[]{"com.miui.weather2"};PackageManager.fail=false;Binder.setCallingIdentityForTest(10100,42);now.set(10_000_000_000L);SystemClock.source=now::get;}
  static void run(String n,Runnable r){reset();try{r.run();passed++;System.out.println("PASS "+n);}catch(Throwable t){failed++;System.out.println("FAIL "+n+" "+t);t.printStackTrace(System.out);}}
  static Map<String,Object> prefs(Object...v){Map<String,Object>p=new HashMap<>();for(int i=0;i<v.length;i+=2)p.put("prefs_key_"+v[i],v[i+1]);return p;}
  static void publish(WeatherNativeEndpointOS4 e,Map<String,Object>v){ContentResolver.values=v;check(e.refreshFromProvider());}
@@ -36,6 +36,7 @@ public class WeatherBridgeTest {
  static void await(CountDownLatch l){try{check(l.await(5,TimeUnit.SECONDS));}catch(InterruptedException e){throw new AssertionError(e);}}
  static void join(Thread t){try{t.join(5000);check(!t.isAlive());}catch(InterruptedException e){throw new AssertionError(e);}}
  static void until(java.util.function.BooleanSupplier done){long end=System.nanoTime()+5_000_000_000L;while(!done.getAsBoolean()){check(System.nanoTime()<end);try{Thread.sleep(2);}catch(InterruptedException e){throw new AssertionError(e);}}}
+ static void sleep(long millis){try{Thread.sleep(millis);}catch(InterruptedException e){throw new AssertionError(e);}}
  static class Gate {final CountDownLatch entered=new CountDownLatch(1),release=new CountDownLatch(1);void block(){entered.countDown();for(;;){try{if(release.await(5,TimeUnit.SECONDS))return;throw new AssertionError("latch timeout");}catch(InterruptedException ignored){}}}}
  static void badCursor(String mode){var e=endpoint();publish(e,prefs("allow_hook",true));long revision=read(e).revision();ContentResolver.failure=mode;check(!e.refreshFromProvider());inactive(read(e),0);check(read(e).revision()>revision);}
  public static void main(String[]args){
@@ -51,6 +52,27 @@ public class WeatherBridgeTest {
   run("existing Home schema4 still 90 columns and unchanged route",()->{SharedPrefsProvider p=new SharedPrefsProvider();p.onCreate();Cursor c=p.query(Uri.parse("content://com.sevtinge.hyperceiler.provider.sharedprefs/home_layout"),null,null,null,null);check(c.moveToFirst());eq(c.getInt(0),4);eq(c.getColumnCount(),90);eq(c.getColumnName(0),"schema");eq(c.getColumnName(1),"home_drawer_hide_search");});
   run("interactive cadence and failure ladder unchanged by the doze floor",()->{eq(WeatherNativeEndpointOS4.nextDelay(1500,true,true),1500L);eq(WeatherNativeEndpointOS4.nextDelay(1500,false,true),3000L);eq(WeatherNativeEndpointOS4.nextDelay(3000,false,true),6000L);eq(WeatherNativeEndpointOS4.nextDelay(30000,false,true),30000L);eq(WeatherNativeEndpointOS4.nextDelay(30000,false,true),30000L);});
   run("doze lifts only the floor and a success still lands promptly after the wake",()->{eq(WeatherNativeEndpointOS4.nextDelay(1500,true,false),30000L);eq(WeatherNativeEndpointOS4.nextDelay(30000,false,false),30000L);eq(WeatherNativeEndpointOS4.nextDelay(6000,true,true),1500L);check(WeatherNativeEndpointOS4.nextDelay(1500,true,false)>=WeatherNativeEndpointOS4.nextDelay(1500,true,true));});
+  run("stock weather sleeps until a relevant preference or authenticated cold read",()->{
+   String pref="content://com.sevtinge.hyperceiler.provider.sharedprefs/pref";
+   var e=endpoint();ContentResolver.values=prefs("allow_hook",true);e.startPrefetch();
+   until(()->e.readSnapshot().available()==1);sleep(1700);eq(ContentResolver.queries.get(),1);
+   ContentResolver.signalChange(pref+"/boolean/prefs_key_unrelated");
+   now.addAndGet(5_000_000_000L);
+   Binder.setCallingIdentityForTest(10100,43);inactive(read(e),0);sleep(180);eq(ContentResolver.queries.get(),1);
+   Binder.setCallingIdentityForTest(10100,42);inactive(read(e),0);
+   until(()->e.readSnapshot().available()==1);eq(ContentResolver.queries.get(),2);
+   ContentResolver.values=prefs("allow_hook",true,"weather_unlock_blur",true);
+   ContentResolver.signalChange(pref+"/boolean/prefs_key_weather_unlock_blur");
+   until(()->e.readSnapshot().blur()==1);
+  });
+  run("screen-on notification wakes the configured weather worker without waiting for doze timeout",()->{
+   PowerManager.interactive=false;var e=endpoint();
+   ContentResolver.values=prefs("allow_hook",true,"weather_device_level","2");e.startPrefetch();
+   until(()->e.readSnapshot().deviceLevel()==2);var old=e.readSnapshot();
+   ContextUtils.signalScreenOn();until(()->e.readSnapshot().revision()>old.revision());
+   Thread worker=(Thread)get(null,"worker");e.retire();join(worker);
+   int queries=ContentResolver.queries.get();ContextUtils.signalScreenOn();eq(ContentResolver.queries.get(),queries);
+  });
   run("specs defensive copies cannot alter schema",()->{var s=WeatherPrefsSnapshot.specs();s[0][1]="wrong";eq(WeatherPrefsSnapshot.specs()[0][1],"weather_device_level");});
   run("physical one-copy snapshot does not mix update during cursor consumption",()->{var e=endpoint();ContentResolver.afterSnapshot=()->ContentResolver.values=prefs("allow_hook",false,"weather_device_level","2");publish(e,prefs("allow_hook",true,"weather_device_level","0"));eq(read(e).flags(),1);eq(read(e).deviceLevel(),0);eq(ContentResolver.queries.get(),1);eq(ContentResolver.reads.get(),1);});
   for(Object[]p:new Object[][]{{"weather_device_level",0},{"weather_device_level","-1"},{"weather_device_level","4"},{"weather_device_level","oops"},{"weather_card_display_type","1"},{"weather_card_display_type","4"},{"weather_unlock_blur",1},{"allow_hook","true"},{"framework_api_allow_hook",1},{"framework_check_reason",7},{"framework_check_name",true},{"framework_check_version",3},{"framework_check_version_code",102}})run("invalid stored type/domain denies whole row "+Arrays.toString(p),()->{var e=endpoint();ContentResolver.values=prefs("allow_hook",true,p[0],p[1]);check(!e.refreshFromProvider());inactive(read(e),0);});

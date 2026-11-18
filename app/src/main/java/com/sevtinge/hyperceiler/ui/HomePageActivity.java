@@ -27,15 +27,12 @@ import com.sevtinge.hyperceiler.about.AboutSettingsFragment;
 import com.sevtinge.hyperceiler.common.log.AndroidLog;
 import com.sevtinge.hyperceiler.common.utils.AppSettingsStore;
 import com.sevtinge.hyperceiler.common.utils.PrefsBridge;
-import com.sevtinge.hyperceiler.common.utils.shell.IResult;
 import com.sevtinge.hyperceiler.dashboard.base.ActivityCallback;
 import com.sevtinge.hyperceiler.home.HomePageFragment;
 import com.sevtinge.hyperceiler.home.IconTitleLoader;
 import com.sevtinge.hyperceiler.home.adapter.HomeContentAdapter;
 import com.sevtinge.hyperceiler.home.manager.PageDecorator;
 import com.sevtinge.hyperceiler.home.task.AppInitializer;
-import com.sevtinge.hyperceiler.log.LogManager;
-import com.sevtinge.hyperceiler.log.XposedLogLoader;
 import com.sevtinge.hyperceiler.home.widget.NavigationStyle;
 import com.sevtinge.hyperceiler.home.widget.SwitchManager;
 import com.sevtinge.hyperceiler.home.widget.SwitchMediator;
@@ -59,7 +56,7 @@ import fan.viewpager.widget.ViewPager;
 import fan.viewpager2.widget.ViewPager2;
 
 public class HomePageActivity extends AppCompatActivity
-    implements ActivityCallback, IResult,
+    implements ActivityCallback,
     PreferenceFragment.OnPreferenceStartFragmentCallback {
 
     private static final String STATE_CURRENT_PAGE = "home_current_page";
@@ -88,8 +85,6 @@ public class HomePageActivity extends AppCompatActivity
             showUnsupportedVersionDialog();
             return;
         }
-        // Log health/import belongs to an explicit UI session, not Provider startup.
-        LogManager.init(this, null, () -> XposedLogLoader.syncLogsToDatabaseSync(this));
         // Activity 启动阶段，绑定 UI 任务（如签名校验弹窗、公告展示）
         AppInitializer.initOnActivityCreate(this, this);
         setContentView(R.layout.activity_home);

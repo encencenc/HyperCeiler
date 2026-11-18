@@ -12,7 +12,8 @@ jdk = test_paths.JAVA_HOME / 'bin'
 endpoint = "library/libhook/src/main/java/com/sevtinge/hyperceiler/libhook/rules/home/dock/HomeLayoutNativeEndpointOS4.java"
 with tempfile.TemporaryDirectory(prefix="hc-idle-snapshot-") as out:
     # Always use the enhanced fault stubs with the requested production source revision.
-    sources = list((tests / "stubs").rglob("*.java")) + list((workspace / "tests/home-dock-window/stubs").rglob("*.java")) + [tests / "HomeLayoutIdleSnapshotTest.java", tests / "HomeLayoutNativeEndpointOS4Test.java", root / endpoint]
+    cases = ["HomeLayoutNativeEndpointOS4Test", "HomeLayoutIdleSnapshotTest", "HomeLayoutRefreshCadenceTest"]
+    sources = list((tests / "stubs").rglob("*.java")) + list((workspace / "tests/home-dock-window/stubs").rglob("*.java")) + [tests / (name + ".java") for name in cases] + [root / endpoint]
     helper = root / "library/libhook/src/main/java/com/sevtinge/hyperceiler/libhook/provider/HomeLayoutPrefsSnapshot.java"
     if helper.exists(): sources.append(helper)
     gesture = root / "library/libhook/src/main/java/com/sevtinge/hyperceiler/libhook/provider/HomeGesturePrefsSnapshot.java"
@@ -22,8 +23,10 @@ with tempfile.TemporaryDirectory(prefix="hc-idle-snapshot-") as out:
     result = subprocess.run([str(test_paths.java_tool('javac')), "-encoding", "UTF-8", "-d", out] + [str(s) for s in sources], capture_output=True, text=True)
     if result.returncode:
         print(result.stderr); sys.exit(result.returncode)
-    for name in ["HomeLayoutNativeEndpointOS4Test", "HomeLayoutIdleSnapshotTest"]:
+    failed = False
+    for name in cases:
         result = subprocess.run([str(test_paths.java_tool('java')), "-ea", "-cp", out, "com.sevtinge.hyperceiler.libhook.rules.home.dock." + name], capture_output=True, text=True)
         print(result.stdout, end=""); print(result.stderr, end="")
-        if result.returncode: sys.exit(result.returncode)
-        if name == "HomeLayoutNativeEndpointOS4Test": print("Existing layout endpoint regression: PASS")
+        failed |= result.returncode != 0
+        if result.returncode == 0 and name == "HomeLayoutNativeEndpointOS4Test": print("Existing layout endpoint regression: PASS")
+    sys.exit(int(failed))

@@ -120,8 +120,8 @@ public final class CombinedSnapshotTest {
    HomeLayoutNativeEndpointOS4.startCombinedPrefetch();
    try {
     long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(7);
-    while(ContentResolver.queries.get()<4&&System.nanoTime()<until)Thread.sleep(20);
-    check(ContentResolver.queries.get()>=4);eq(read().flags(),1);
+    while(ContentResolver.queries.get()<3&&System.nanoTime()<until)Thread.sleep(20);
+    check(ContentResolver.queries.get()>=3);eq(read().flags(),1);
     ContentResolver.values=prefs("allow_hook",false);ContentResolver.afterSnapshot=invalidation::block;
     ContentResolver.signalChange("content://com.sevtinge.hyperceiler.provider.sharedprefs/pref/boolean/allow_hook");
     invalidation.entered();inactive(read(),0);invalidation.release.countDown();

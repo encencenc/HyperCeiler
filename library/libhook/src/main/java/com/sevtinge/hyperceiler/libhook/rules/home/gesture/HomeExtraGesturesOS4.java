@@ -5,8 +5,10 @@ import android.app.ActivityManager;
 import android.app.Application;
 import android.app.Instrumentation;
 import android.app.KeyguardManager;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.database.ContentObserver;
 import android.database.Cursor;
@@ -55,7 +57,11 @@ public final class HomeExtraGesturesOS4 extends BaseHook {
     private HomeExtraGestureState.Geometry geometry;
     private SensorManager sensors;
     private Sensor accelerometer;
-    private boolean sensorRegistered,available,homeForeground;
+    private PowerManager power;
+    private KeyguardManager keyguard;
+    private volatile boolean available;
+    private volatile long homePollGeneration;
+    private boolean sensorRegistered,homeForeground,screenEvents,homePolling;
     private int device,source,display,pointer;
     private Method eventDisplay,monitorInput;
 
@@ -73,14 +79,22 @@ public final class HomeExtraGesturesOS4 extends BaseHook {
         if(closed||worker!=null||!"com.android.systemui".equals(app.getPackageName()))return;
         context=app;
         HandlerThread thread=new HandlerThread("HC-ExtraGesture");thread.start();worker=new Handler(thread.getLooper());
-        ContentObserver observer=new ContentObserver(worker){@Override public void onChange(boolean self){refresh();}};
-        app.getContentResolver().registerContentObserver(ROOT,true,observer);
+        ContentObserver observer=new ContentObserver(worker){
+            @Override public void onChange(boolean self,Uri uri){
+                String key=uri==null?null:uri.getLastPathSegment();
+                if(key==null||key.equals("pref")||key.startsWith("prefs_key_home_gesture_")
+                    ||key.startsWith("prefs_key_home_navigation_"))refresh();
+            }
+        };
+        app.getContentResolver().registerContentObserver(Uri.withAppendedPath(ROOT,"pref"),true,observer);
         registerHotReloadCleanup(()->{app.getContentResolver().unregisterContentObserver(observer);thread.quitSafely();});
         main.post(()->{
             if(closed)return;
             try {
                 sensors=app.getSystemService(SensorManager.class);
                 accelerometer=sensors==null?null:sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
+                power=app.getSystemService(PowerManager.class);
+                keyguard=app.getSystemService(KeyguardManager.class);
                 ViewConfiguration vc=ViewConfiguration.get(app);
                 // Reserve a stationary long press before the stock timeout; original monitor
                 // owners receive CANCEL, while the first ordinary swipe remains untouched.
@@ -92,10 +106,30 @@ public final class HomeExtraGesturesOS4 extends BaseHook {
                     monitorInput=InputManager.class.getDeclaredMethod("monitorGestureInput",String.class,int.class);
                     monitorInput.setAccessible(true);
                 }catch(Exception ex){log("navigation contract declined; sensor remains independent",ex);}
-                tick.run();
+                observeScreen(app);
+                updateAvailability();
             }catch(Exception ex){log("platform contract declined",ex);}
         });
-        worker.post(this::refresh);worker.post(pollHome);
+        worker.post(this::refresh);
+    }
+
+    private void observeScreen(Context app) {
+        BroadcastReceiver receiver=new BroadcastReceiver() {
+            @Override public void onReceive(Context context,Intent intent){updateAvailability();}
+        };
+        IntentFilter filter=new IntentFilter(Intent.ACTION_SCREEN_ON);
+        filter.addAction(Intent.ACTION_SCREEN_OFF);
+        filter.addAction(Intent.ACTION_USER_PRESENT);
+        try {
+            app.registerReceiver(receiver,filter,null,main,Context.RECEIVER_NOT_EXPORTED);
+            registerReceiverHotReloadCleanup(app,receiver);
+            screenEvents=true;
+        }catch(RuntimeException ex){log("screen observer unavailable; polling only configured gestures",ex);}
+    }
+
+    private void updateAvailability() {
+        main.removeCallbacks(tick);
+        tick.run();
     }
     private void refresh() {
         int next=0;StringBuilder stamp=new StringBuilder();
@@ -111,14 +145,14 @@ public final class HomeExtraGesturesOS4 extends BaseHook {
         }catch(Exception ex){stamp.setLength(0);log("configuration declined",ex);}
         int value=next;String identity=stamp.toString();
         main.post(()->{if(closed||fingerprint.equals(identity))return;fingerprint=identity;mask=value;revision++;
-            if(touch!=null)touch.reset();shake.reset();main.removeCallbacks(longPress);main.removeCallbacks(tick);if(touch!=null)tick.run();
+            if(touch!=null)touch.reset();shake.reset();main.removeCallbacks(longPress);updateAvailability();
             log("config mask="+mask+" revision="+revision,null);});
     }
     private final Runnable pollHome=new Runnable(){@Override public void run(){
-        if(closed)return;
+        long generation=homePollGeneration;
+        if(closed||!available||(mask&1)==0)return;
         boolean foreground=false;
         try {
-            if((mask&1)!=0) {
             var home=context.getPackageManager().resolveActivity(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME),PackageManager.MATCH_DEFAULT_ONLY);
             var tasks=context.getSystemService(ActivityManager.class).getRunningTasks(1);
             if(home!=null&&home.activityInfo!=null&&!tasks.isEmpty()) {
@@ -126,23 +160,51 @@ public final class HomeExtraGesturesOS4 extends BaseHook {
                 foreground=top!=null&&top.getPackageName().equals(home.activityInfo.packageName)
                     &&top.getClassName().equals(home.activityInfo.targetActivity!=null?home.activityInfo.targetActivity:home.activityInfo.name);
             }
-            }
         }catch(Exception ignored){}
         boolean current=foreground;
-        main.post(()->{if(closed)return;homeForeground=current;reconcile();});
-        worker.postDelayed(this,500);
+        main.post(()->{
+            if(closed||!homePolling||generation!=homePollGeneration)return;
+            if(!isGestureAvailable()){updateAvailability();return;}
+            homeForeground=current;
+            updateSensor();
+            if(homePolling){
+                worker.removeCallbacks(this);
+                worker.postDelayed(this,500);
+            }
+        });
     }};
+
+    private void updateHomePolling() {
+        boolean needed=available&&(mask&1)!=0;
+        if(needed==homePolling)return;
+        homePolling=needed;
+        homePollGeneration++;
+        worker.removeCallbacks(pollHome);
+        if(needed)worker.post(pollHome);
+        else homeForeground=false;
+    }
+
     private final Runnable tick=new Runnable(){@Override public void run(){
-        if(closed)return;
+        if(closed||touch==null)return;
         try {
-            available=mask!=0&&context.getSystemService(PowerManager.class).isInteractive()
-                &&!context.getSystemService(KeyguardManager.class).isKeyguardLocked();
+            available=isGestureAvailable();
             geometry=!available||(mask&30)==0||regions==null?null:regions.current();
             if(!available||geometry==null){touch.reset();main.removeCallbacks(longPress);}
+            updateHomePolling();
             reconcile();
-        }catch(Exception ex){available=false;geometry=null;disposeInput();log("navigation owner declined",ex);}
-        main.postDelayed(this,mask==0?1000:200);
+        }catch(Exception ex){
+            available=false;geometry=null;
+            updateHomePolling();disposeInput();updateSensor();log("navigation owner declined",ex);
+        }
+        if(available&&(mask&30)!=0&&regions!=null)main.postDelayed(this,200);
+        else if(mask!=0&&!screenEvents)main.postDelayed(this,1000);
     }};
+    private boolean isGestureAvailable() {
+        try {
+            return mask!=0&&power!=null&&keyguard!=null&&power.isInteractive()&&!keyguard.isKeyguardLocked();
+        }catch(RuntimeException unavailable){return false;}
+    }
+
     private void reconcile() {
         if(context==null||touch==null||closed)return;
         boolean input=available&&geometry!=null&&eventDisplay!=null&&monitorInput!=null&&(mask&30)!=0;
@@ -154,9 +216,14 @@ public final class HomeExtraGesturesOS4 extends BaseHook {
             log("platform input monitor attached",null);
         }catch(Exception ex){log("input monitor declined",ex);}
         else if(!input&&monitor!=null)disposeInput();
+        updateSensor();
+    }
+    private void updateSensor() {
         boolean sensor=available&&homeForeground&&(mask&1)!=0&&accelerometer!=null;
-        if(sensor&&!sensorRegistered){shake.reset();sensorRegistered=sensors.registerListener(listener,accelerometer,SensorManager.SENSOR_DELAY_GAME,main);}
-        else if(!sensor&&sensorRegistered){sensors.unregisterListener(listener);sensorRegistered=false;shake.reset();}
+        try {
+            if(sensor&&!sensorRegistered){shake.reset();sensorRegistered=sensors.registerListener(listener,accelerometer,SensorManager.SENSOR_DELAY_GAME,main);}
+            else if(!sensor&&sensorRegistered){sensors.unregisterListener(listener);sensorRegistered=false;shake.reset();}
+        }catch(RuntimeException ex){log("shake sensor declined",ex);}
     }
     private final SensorEventListener listener=new SensorEventListener(){
         @Override public void onAccuracyChanged(Sensor sensor,int accuracy){}
@@ -225,6 +292,8 @@ public final class HomeExtraGesturesOS4 extends BaseHook {
     }
     private void dispose() {
         main.removeCallbacksAndMessages(null);disposeInput();
+        available=false;
+        if(worker!=null)updateHomePolling();
         if(sensorRegistered&&sensors!=null)sensors.unregisterListener(listener);sensorRegistered=false;shake.reset();
     }
     private static void log(String message,Exception ex){if(ex==null)com.sevtinge.hyperceiler.common.log.ModuleLog.i(TAG_LOG,message);else com.sevtinge.hyperceiler.common.log.ModuleLog.w(TAG_LOG,message,ex);}

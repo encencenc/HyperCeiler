@@ -22,21 +22,27 @@ package com.sevtinge.hyperceiler.utils;
 import static com.sevtinge.hyperceiler.Application.isModuleActivated;
 import static com.sevtinge.hyperceiler.common.utils.api.ProjectApi.isRelease;
 
-import android.content.Context;
+import android.app.Activity;
 import android.os.Handler;
 import android.os.Looper;
 
 import com.sevtinge.hyperceiler.common.log.LogStatusManager;
 import com.sevtinge.hyperceiler.common.utils.PrefsBridge;
 
+import java.lang.ref.WeakReference;
+
 public class LogServiceUtils {
 
-    public static void init(Context context) {
+    public static void init(Activity activity) {
+        WeakReference<Activity> activityRef = new WeakReference<>(activity);
         LogStatusManager.onHealthCheckDone(() -> {
             if (shouldShowLogServiceWarn()) {
-                new Handler(Looper.getMainLooper()).post(() ->
-                    DialogHelper.showLogServiceWarnDialog(context)
-                );
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    Activity owner = activityRef.get();
+                    if (owner != null && !owner.isFinishing() && !owner.isDestroyed()) {
+                        DialogHelper.showLogServiceWarnDialog(owner);
+                    }
+                });
             }
         });
     }

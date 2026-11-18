@@ -14,6 +14,7 @@ import com.sevtinge.hyperceiler.libhook.base.BaseHook;
 import com.sevtinge.hyperceiler.libhook.base.BaseLoad;
 import com.sevtinge.hyperceiler.libhook.base.FrameworkHookGate;
 import com.sevtinge.hyperceiler.libhook.provider.HomeLayoutPrefsSnapshot;
+import com.sevtinge.hyperceiler.libhook.utils.api.ContextUtils;
 
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -53,7 +54,7 @@ public final class HomeLayoutNativeEndpointOS4 {
     private static final String PREFS_AUTHORITY = "com.sevtinge.hyperceiler.provider.sharedprefs";
     // HCS1 authorization expires after five BOOTTIME seconds, even without a settings write.
     // Renew on the existing worker; notifications still coalesce slider updates promptly.
-    private static final long PREFS_REFRESH_MS = 1500;
+    private static final long PREFS_REFRESH_MS = 3000;
     private static final long INITIAL_RETRY_MS = 1500;
     private static final long CHANGE_MIN_INTERVAL_NS = 150_000_000L;
     /**
@@ -73,14 +74,7 @@ public final class HomeLayoutNativeEndpointOS4 {
      * reason on this ROM.
      */
     private static final long DOZE_REFRESH_MS = 30000;
-    /**
-     * The idle cadence is waited out in slices this long, so that the first interactive cycle starts
-     * - and republishes a live lease - within a slice of the wake instead of up to
-     * {@link #DOZE_REFRESH_MS} after it. A slice is a local read of this process's own power
-     * service; a cycle is a query that can cold start another app, so slicing is what keeps the
-     * reduced cadence from being paid for at every unlock.
-     */
-    private static final long IDLE_SLICE_MS = 1000;
+    private static final long FALLBACK_SCREEN_CHECK_MS = 1000;
     private static final String TAG = "HyperCeiler.HomeLayoutEndpoint";
     private static volatile java.util.Map<String, Object> cachedValues;
     // Published with the same provider revision, never restored as live authorization.
@@ -97,6 +91,7 @@ public final class HomeLayoutNativeEndpointOS4 {
     private static volatile boolean paused;
     private static long refreshEpoch;
     private static long notificationVersion;
+    private static long screenWakeVersion;
     private static long refreshTicket;
     private static long combinedEpoch;
     private static long combinedRevision;
@@ -147,6 +142,7 @@ public final class HomeLayoutNativeEndpointOS4 {
 
     private static boolean isLayoutChange(Uri uri) {
         if (uri == null) return true; // A broad invalidation must never be dropped.
+        if (("content://" + PREFS_AUTHORITY + "/pref").equals(uri.toString())) return true;
         final String path = uri.toString();
         final int slash = path.lastIndexOf('/');
         final String segment = path.substring(slash + 1);
@@ -157,6 +153,7 @@ public final class HomeLayoutNativeEndpointOS4 {
             || HomeLayoutPrefsSnapshot.RECENT_TEXT_KEY.equals(key)
             || HomeLayoutPrefsSnapshot.INFINITE_KEY.equals(key)
             || HomeLayoutPrefsSnapshot.RECENTS_BAR_KEY.equals(key)
+            || HomeLayoutPrefsSnapshot.RECENT_CARDS_KEY.equals(key)
             || HomeLayoutPrefsSnapshot.DOCK_HORIZONTAL_KEY.equals(key)
             || (HomeLayoutPrefsSnapshot.DOCK_HORIZONTAL_KEY + "_enable").equals(key)) return true;
         for (String[] spec : PREF_KEYS) {
@@ -215,27 +212,6 @@ public final class HomeLayoutNativeEndpointOS4 {
         return interactive ? period : Math.max(period, DOZE_REFRESH_MS);
     }
 
-    /**
-     * Wait out one idle period in {@link #IDLE_SLICE_MS} slices. Returns as soon as the panel is
-     * interactive, so the caller's next cycle republishes a lease the wake can use; a settings write
-     * observed during the wait is left to the caller's revision check, which still refreshes
-     * promptly. {@code period} is consumed entirely when the panel stays in doze.
-     */
-    private static boolean idleGateElapsed(long period, long epoch) throws InterruptedException {
-        if (period <= IDLE_SLICE_MS || screenInteractive()) {
-            refresherLock.wait(period);
-            return true;
-        }
-        long remaining = period;
-        while (remaining > 0) {
-            refresherLock.wait(Math.min(remaining, IDLE_SLICE_MS));
-            if (paused || refreshEpoch != epoch) return false;
-            if (screenInteractive()) return true;
-            remaining -= IDLE_SLICE_MS;
-        }
-        return true;
-    }
-
     private static void ensureRefresher() {
         restoreProviderSnapshot();
         synchronized (refresherLock) {
@@ -244,6 +220,7 @@ public final class HomeLayoutNativeEndpointOS4 {
             refresher = new Thread(() -> {
                 ContentResolver resolver = null;
                 ContentObserver observer = null;
+                Runnable unregisterScreenObserver = null;
                 long retry = INITIAL_RETRY_MS;
                 long lastQueryAtNanos = 0;
                 try {
@@ -253,12 +230,20 @@ public final class HomeLayoutNativeEndpointOS4 {
                                 com.sevtinge.hyperceiler.libhook.utils.api.ContextUtils.FlAG_ONLY_ANDROID);
                         if (context != null) {
                             resolver = context.getContentResolver();
+                            unregisterScreenObserver = ContextUtils.observeScreenOn(context, () -> {
+                                synchronized (refresherLock) {
+                                    if (paused || refreshEpoch != epoch) return;
+                                    ++screenWakeVersion;
+                                    refresherLock.notifyAll();
+                                }
+                            });
                         }
                         if (resolver != null) {
                             final ContentObserver candidate = new ContentObserver(null) {
                                 @Override public void onChange(boolean selfChange, Uri uri) {
                                     if (!isLayoutChange(uri)) return;
                                     synchronized (refresherLock) {
+                                        if (paused || refreshEpoch != epoch) return;
                                         ++notificationVersion;
                                         invalidateCombinedLocked();
                                         refresherLock.notifyAll();
@@ -271,10 +256,11 @@ public final class HomeLayoutNativeEndpointOS4 {
                         }
                     } catch (RuntimeException | Error unavailable) {
                         // A broken content service must not crash system_server's worker.
-                        // Unobserved systems continue with a bounded five-second fallback.
+                        // Unobserved systems continue with bounded polling.
                     }
                     for (;;) {
                         final long beforeQuery;
+                        final long beforeWake;
                         synchronized (refresherLock) {
                             if (paused || refreshEpoch != epoch) return;
                             // Slider drags may emit dozens of writes per second. Coalesce them
@@ -288,27 +274,54 @@ public final class HomeLayoutNativeEndpointOS4 {
                                 }
                             }
                             beforeQuery = notificationVersion;
+                            beforeWake = screenWakeVersion;
                         }
+                        final long started = System.nanoTime();
                         final boolean success = refreshFromProvider();
                         lastQueryAtNanos = System.nanoTime();
+                        final PublishedSnapshot current = combinedPublished;
+                        final boolean dormant = success && observer != null && current != null
+                            && current.values() != null
+                            && !readBoolean(current.values(), "allow_hook", false);
                         final long period;
                         if (success) {
                             retry = INITIAL_RETRY_MS;
-                            period = PREFS_REFRESH_MS;
+                            // Count from query start: a slow read does not consume the renewal margin.
+                            period = Math.max(1, PREFS_REFRESH_MS - (lastQueryAtNanos - started) / 1_000_000);
                         } else {
                             retry = Math.min(retry * 2, MAX_REFRESH_BACKOFF_MS);
                             period = retry;
                         }
+                        final boolean interactive = dormant || screenInteractive();
                         synchronized (refresherLock) {
                             if (paused || refreshEpoch != epoch) return;
                             // A write during the query needs a new whole-file revision now.
                             if (notificationVersion != beforeQuery) continue;
-                            idleGateElapsed(idlePeriod(period, screenInteractive()), epoch);
+                            if (dormant) {
+                                while (!paused && refreshEpoch == epoch && notificationVersion == beforeQuery
+                                        && screenWakeVersion == beforeWake)
+                                    refresherLock.wait();
+                                continue;
+                            }
+                            if (screenWakeVersion != beforeWake) continue;
+                            long remaining = idlePeriod(period, interactive);
+                            if (unregisterScreenObserver != null || interactive) {
+                                refresherLock.wait(remaining);
+                            } else {
+                                while (remaining > 0 && !paused && refreshEpoch == epoch
+                                        && notificationVersion == beforeQuery) {
+                                    final long slice = Math.min(remaining, FALLBACK_SCREEN_CHECK_MS);
+                                    refresherLock.wait(slice);
+                                    if (screenInteractive()) break;
+                                    remaining -= slice;
+                                }
+                            }
                         }
                     }
                 } catch (InterruptedException cancelled) {
                     Thread.currentThread().interrupt();
                 } finally {
+                    if (unregisterScreenObserver != null) unregisterScreenObserver.run();
                     if (resolver != null && observer != null) {
                         try { resolver.unregisterContentObserver(observer); }
                         catch (RuntimeException | Error unavailable) { /* Retiring after provider death. */ }

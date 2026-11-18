@@ -285,6 +285,7 @@ class HomeDockWindow : BaseHook() {
     private val observed = HashSet<String>()
     @Volatile private var stopped = false
     @Volatile private var settings = Settings.read()
+    @Volatile private var settingsSource: Pair<String?, DockGlassClient.GeometrySnapshot?>? = null
     @Volatile private var service: Any? = null
     private var blurAvailable = true
     private var revealScalingAvailable = true
@@ -446,10 +447,7 @@ class HomeDockWindow : BaseHook() {
         val prefs = PrefsBridge.getSharedPreferences()
         val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
             if (key == null || key.contains("home_dock_") || key.endsWith("home_other_home_mode")) {
-                // Advisory only. The callback now tells us when it is worth redrawing, it is no
-                // longer what makes a value visible: the sweep and every traversal read the
-                // preferences themselves. Refresh first so the requested traversal cannot see the
-                // previous value, and never fail the hook closed over a read.
+                // The provider and sweep also cover writes missed by the remote listener.
                 resetSweepCadence()
                 refreshSettings()
                 requestTraversal()
@@ -488,15 +486,12 @@ class HomeDockWindow : BaseHook() {
      * restarted the desktop, nothing happened", while a local test that happened to keep the
      * update path alive appeared to work.
      *
-     * Reading here is cheap (a handful of in-memory lookups on the remote map) and every caller is
-     * already doing far more expensive work - one is a full layout pass. A failed read keeps the
-     * last known-good values rather than failing the hook closed: a stale dock is strictly better
-     * than no dock.
+     * Refresh on a notification, a new provider result, or the idle sweep. A failed read keeps
+     * the last known-good values.
      *
      * @return true when at least one value actually changed.
      */
     private fun refreshSettings(): Boolean {
-        val latest = runCatching { Settings.read() }.getOrNull() ?: return false
         // The provider reads the file the settings UI wrote, so it is the source of truth. The
         // remote snapshot system_server sees can be stale for a whole process lifetime when the
         // daemon's push is lost, and nothing below the daemon - not a launcher restart, not a
@@ -505,6 +500,7 @@ class HomeDockWindow : BaseHook() {
         // the window before the first successful query.
         val liveStyle = glassClient.liveRevealStyle()
         val liveGeometry = glassClient.liveGeometry()
+        val latest = runCatching { Settings.read() }.getOrNull() ?: return false
         var resolved = if (liveStyle == null) latest
             else latest.copy(revealStyle = DockUnlockReveal.Style.of(liveStyle))
         if (liveGeometry != null) {
@@ -520,7 +516,10 @@ class HomeDockWindow : BaseHook() {
                 nightMode = liveGeometry.homeMode ?: resolved.nightMode
             )
         }
-        if (resolved == settings) return false
+        if (resolved == settings) {
+            settingsSource = liveStyle to liveGeometry
+            return false
+        }
         val previousStyle = settings.revealStyle
         settings = resolved
         // A style change must reach already-built layers; new layers read it at creation.
@@ -530,6 +529,7 @@ class HomeDockWindow : BaseHook() {
                 if (previousStyle != resolved.revealStyle) it.resetAutoAim()
             }
         }
+        settingsSource = liveStyle to liveGeometry
         glassClient.record("prefs applied enabled=${resolved.enabled} mode=${resolved.mode} " +
             "height=${resolved.height} margin=${resolved.margin} bottom=${resolved.bottom} " +
             "radius=${resolved.radius} reveal=${resolved.revealStyle.name.lowercase()}")
@@ -742,7 +742,9 @@ class HomeDockWindow : BaseHook() {
             // The style query is asynchronous and throttled; its result lands on a later traversal.
             glassClient.refreshRevealStyle()
             glassClient.refreshGeometry()
-            refreshSettings()
+            val source = settingsSource
+            if (source == null || source.first != glassClient.liveRevealStyle() ||
+                source.second !== glassClient.liveGeometry()) refreshSettings()
             val title = attrs.title.toString()
             synchronized(layers) {
                 if (stopped) return
@@ -987,10 +989,7 @@ class HomeDockWindow : BaseHook() {
         fun isDisplayRotated(): Boolean = rotation.isRotated()
 
         fun update(window: Any) {
-            // Already re-read by prepareWindow (every launcher traversal) and by the 1 Hz sweep,
-            // so this is the live configuration rather than the value captured at hook init.
-            // Nothing below caches it across traversals: changing a parameter and re-laying the
-            // window always recomputes the bounds from the current values.
+            // Preference events, provider changes and the sweep keep this snapshot current.
             val config = settings
             if (!config.enabled) { removeLayer(window); return }
             val parent = window.callMethod("getSurfaceControl") ?: return

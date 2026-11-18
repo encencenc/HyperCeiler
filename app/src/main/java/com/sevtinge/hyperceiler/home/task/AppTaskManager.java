@@ -7,14 +7,11 @@ import android.os.Handler;
 import android.os.Looper;
 
 import com.sevtinge.hyperceiler.common.utils.PrefsBridge;
-import com.sevtinge.hyperceiler.common.utils.shell.ShellInit;
 import com.sevtinge.hyperceiler.home.manager.PageDecorator;
 import com.sevtinge.hyperceiler.libhook.utils.pkg.CheckModifyUtils;
-import com.sevtinge.hyperceiler.search.SearchHelper;
 import com.sevtinge.hyperceiler.ui.HomePageActivity;
 import com.sevtinge.hyperceiler.utils.LSPosedScopeHelper;
 import com.sevtinge.hyperceiler.utils.LanguageHelper;
-import com.sevtinge.hyperceiler.utils.LogServiceUtils;
 import com.sevtinge.hyperceiler.utils.NoticeProcessor;
 
 import java.util.List;
@@ -80,7 +77,6 @@ public class AppTaskManager {
             public void execute() {
                 // 调用装饰器：处理滤镜和节日特效
                 PageDecorator.decorate(activity);
-                LogServiceUtils.init(activity);
 
                 new Thread(() -> {
                     NoticeProcessor.NoticeResult result = NoticeProcessor.process(context);
@@ -100,22 +96,11 @@ public class AppTaskManager {
             }
         });
 
-        // 异步业务逻辑：初始化 Shell、执行签名校验
+        // 签名校验结果会影响模块选择，仍在后台检查。
         runner.addTask(new Task("BusinessLogic", true, "BaseEnv", "attachBaseContext") {
             @Override
             public void execute() {
-                ShellInit.init(activity);
-                // 原 Activity 的 checkAppMod 逻辑迁移到此
-                CHECK_LIST.parallelStream().forEach(pkg -> {
-                    checkAppMod(activity, pkg);
-                });
-            }
-        });
-
-        runner.addTask(new Task("UI_Effect", false) {
-            @Override
-            public void execute() {
-                SearchHelper.initIndex(activity, true);
+                for (String pkg : CHECK_LIST) checkAppMod(context, pkg);
             }
         });
     }
